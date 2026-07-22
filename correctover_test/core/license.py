@@ -99,18 +99,22 @@ class LicenseValidator:
         return False
 
     def _verify_license_key(self, key: str) -> bool:
-        """Basic license key validation (HMAC-based)."""
+        """Basic license key validation (HMAC-based).
+
+        Format: COV-<product>-<hash>. The product slug may itself contain
+        hyphens (e.g. ``correctover-test``), so the product is everything
+        between the leading ``COV-`` and the final ``-<hash>`` segment.
+        """
         if not key or len(key) < 16:
             return False
 
-        # Format: COV-<product>-<hash>
         parts = key.split("-")
         if len(parts) < 3 or parts[0] != "COV":
             return False
 
-        # Verify the HMAC signature
-        expected_prefix = self._compute_key_prefix(parts[1])
-        return parts[2].startswith(expected_prefix)
+        product_code = "-".join(parts[1:-1])
+        expected_prefix = self._compute_key_prefix(product_code)
+        return parts[-1].startswith(expected_prefix)
 
     def _compute_key_prefix(self, product_code: str) -> str:
         secret = f"correctover-{product_code}-2026"
