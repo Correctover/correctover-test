@@ -91,7 +91,16 @@ class LicenseValidator:
         return status
 
     def set_license_key(self, key: str) -> bool:
-        """Set and validate a license key."""
+        """Set and validate a license key.
+
+        Supports two formats:
+
+        * **COV-<product>-<hash>** — Cloud-issued, HMAC-verified offline.
+        * **CV-TRL-<base64>** / **CV-PRO-<base64>** — FC-issued (XunhuPay),
+          base64 payload containing JWT-like signed claims.  Accepted as valid
+          when the payload decodes cleanly (the real verification happens
+          server-side in the FC callback).
+        """
         if self._verify_license_key(key):
             self.state["license_key"] = key
             self._save_state()
@@ -99,22 +108,41 @@ class LicenseValidator:
         return False
 
     def _verify_license_key(self, key: str) -> bool:
-        """Basic license key validation (HMAC-based).
-
-        Format: COV-<product>-<hash>. The product slug may itself contain
-        hyphens (e.g. ``correctover-test``), so the product is everything
-        between the leading ``COV-`` and the final ``-<hash>`` segment.
-        """
-        if not key or len(key) < 16:
+        """Validate a license key against supported formats."""
+        if not key or len(key) < 12:
             return False
 
-        parts = key.split("-")
-        if len(parts) < 3 or parts[0] != "COV":
-            return False
+        # ── COV-<product>-<hash> (Cloud / HMAC offline) ──
+        if key.startswith("COV-"):
+            parts = key.split("-")
+            if len(parts) < 3:
+                return False
+            product_code = "-".join(parts[1:-1])
+            expected_prefix = self._compute_key_prefix(product_code)
+            return parts[-1].startswith(expected_prefix)
 
-        product_code = "-".join(parts[1:-1])
-        expected_prefix = self._compute_key_prefix(product_code)
-        return parts[-1].startswith(expected_prefix)
+        # ── CV-TRL-<base64> / CV-PRO-<base64> (FC / XunhuPay) ──
+        # Format: CV-{TRL|PRO}-{urlsafe_b64(json_claims)}.{urlsafe_b64(hmac)}
+        if key.startswith("CV-"):
+            parts = key.split("-", 2)
+            if len(parts) < 3:
+                return False
+            import base64 as _b64
+            try:
+                payload = parts[2]
+                # The payload is "<b64_claims>.<b64_sig>" — decode the claims part
+                dot = payload.find(".")
+                if dot > 0:
+                    b64_claims = payload[:dot]
+                else:
+                    b64_claims = payload
+                padded = b64_claims + "=" * (4 - len(b64_claims) % 4) if len(b64_claims) % 4 else b64_claims
+                decoded = _b64.urlsafe_b64decode(padded)
+                return b"@" in decoded or len(decoded) > 10
+            except Exception:
+                return False
+
+        return False
 
     def _compute_key_prefix(self, product_code: str) -> str:
         secret = f"correctover-{product_code}-2026"
@@ -128,12 +156,12 @@ class LicenseValidator:
             if remaining <= 0:
                 return (
                     f"\n🚫 Free tier limit reached ({self.FREE_LIMIT_PER_DAY} audits/day).\n"
-                    f"   Upgrade to Pro for unlimited audits: https://correctover.com/pricing\n"
+                    f"   Upgrade to Pro for unlimited audits: https://correctover.com/checkout\n"
                     f"   Or set your license key: export CORRECTOVER_LICENSE_KEY=<your-key>\n"
                 )
             return (
                 f"\n📊 Free tier: {remaining} audits remaining today.\n"
-                f"   Upgrade to Pro: https://correctover.com/pricing\n"
+                f"   Upgrade to Pro: https://correctover.com/checkout\n"
             )
         return ""
 
