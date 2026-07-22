@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "correctover-test"
+version = "0.2.0"
+description = "🔒 Correctover Agent Security Audit — test your AI agents for guardrail gaps in 5 seconds. Supports CrewAI, Smolagents, LlamaIndex."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "NeuralBridge", email = "wangguigui@correctover.com" }]
+keywords = ["ai", "agent", "security", "guardrail", "llm", "correctover", "self-healing", "audit"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "correctover>=2.2.0",
+    "click>=8.0",
+    "pydantic>=2.0",
+]
+
+[project.urls]
+Homepage = "https://correctover.com"
+Documentation = "https://correctover.com/docs"
+Repository = "https://github.com/Correctover/correctover-test"
+Issues = "https://github.com/Correctover/correctover-test/issues"
+
+[project.optional-dependencies]
+all = ["crewai", "smolagents", "llama-index-core"]
+crewai = ["crewai"]
+smolagents = ["smolagents"]
+llamaindex = ["llama-index-core"]
+
+[project.scripts]
+correctover-test = "correctover_test.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["correctover_test"]
