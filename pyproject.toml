@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "correctover-test"
 version = "0.3.2"
-description = "🔒 Correctover Agent Security Audit — test your AI agents for guardrail gaps in 5 seconds. Supports CrewAI, Smolagents, LlamaIndex."
+description = "AI Agent self-healing test suite — 84.1% success rate across 20K+ scenarios. Supports CrewAI, Smolagents, LlamaIndex. 6-dimension verification, 0.4ms failover."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "NeuralBridge", email = "wangguigui@correctover.com" }]
-keywords = ["ai", "agent", "security", "guardrail", "llm", "correctover", "self-healing", "audit"]
+keywords = ["ai-agent", "self-healing", "security", "guardrail", "llm", "mcp", "crewai", "smolagents", "llamaindex", "correctover", "audit", "reliability"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
