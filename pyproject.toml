@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "correctover-test"
-version = "0.3.2"
+version = "0.3.3"
 description = "AI Agent self-healing test suite — 84.1% success rate across 20K+ scenarios. Supports CrewAI, Smolagents, LlamaIndex. 6-dimension verification, 0.4ms failover."
 readme = "README.md"
 license = { text = "Apache-2.0" }
