@@ -17,6 +17,7 @@ import click
 
 from .core.engine import TestEngine
 from .core.reporter import Reporter
+from .core.license import get_validator, LicenseExceededError
 from .core.adapters import CrewAIAdapter, SmolagentsAdapter, LlamaIndexAdapter
 from .core.scenarios import MCPSelfHealScenario, EnvProtectionScenario, ContractBreakScenario
 
@@ -140,6 +141,24 @@ def main(
                 )
                 sys.exit(1)
             scenarios.append(SCENARIO_REGISTRY[sc]())
+
+    # License check — download-to-pay enforcement
+    try:
+        from .core.license import LicenseValidator
+        license_key = LicenseValidator.get_license_from_env()
+        validator = get_validator()
+        if license_key:
+            validator.set_license_key(license_key)
+        status = validator.record_call()
+        if status["tier"] == "free":
+            click.echo(
+                f"📊 Free tier: {status['calls_remaining']} audits remaining today "
+                f"({status['calls_today']}/{status['limit']} used)",
+                err=True,
+            )
+    except LicenseExceededError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
 
     # Run
     click.echo(

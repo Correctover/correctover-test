@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "correctover-test"
-version = "0.2.0"
+version = "0.3.0"
 description = "🔒 Correctover Agent Security Audit — test your AI agents for guardrail gaps in 5 seconds. Supports CrewAI, Smolagents, LlamaIndex."
 readme = "README.md"
 license = { text = "Apache-2.0" }
