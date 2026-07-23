@@ -1,11 +1,11 @@
 """
-License validator — enforces free tier limits (30 checks/month, no reset).
-Embedded in all Correctover Agent products.
+License validator — freemium hook model.
 
-Billing model:
-  - Free: 30 checks/month (cumulative, no daily reset)
-  - Pro:  unlimited
-  - 1 check = 1 test scenario executed (e.g. --all = 9 checks)
+  - Free: unlimited scanning (see all risks)
+  - Pro: fix recommendations, auto-heal, reports, history
+  
+The hook: users see ALL their problems for free.
+The paywall: solutions are locked.
 """
 
 import hashlib
@@ -17,10 +17,15 @@ from typing import Dict, Optional
 
 
 class LicenseValidator:
-    """Enforces usage limits for Correctover Agent products."""
+    """Freemium license — scan free, fix paid."""
 
-    FREE_LIMIT_PER_MONTH = 30
     STATE_FILE = Path.home() / ".correctover" / "license.json"
+
+    # Free tier: unlimited scans, but results are gated
+    FREE_SCAN_LIMIT = float("inf")  # unlimited scanning
+    FREE_FIX_PREVIEW = 2            # show first 2 fix recommendations
+    FREE_REPORT = False             # no HTML/PDF reports
+    FREE_HISTORY = False            # no scan history
 
     def __init__(self, product: str):
         self.product = product
@@ -32,7 +37,7 @@ class LicenseValidator:
                 return json.loads(self.STATE_FILE.read_text())
             except (json.JSONDecodeError, OSError):
                 pass
-        return {"products": {}, "license_key": None, "installed_at": time.time()}
+        return {"products": {}, "license_key": None, "installed_at": time.time(), "scan_history": []}
 
     def _save_state(self) -> None:
         self.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -40,85 +45,64 @@ class LicenseValidator:
 
     def _get_product_state(self) -> Dict:
         return self.state["products"].setdefault(self.product, {
-            "checks_used": 0,
-            "month": time.strftime("%Y-%m"),
-            "total_checks": 0,
+            "total_scans": 0,
+            "total_risks_found": 0,
+            "first_scan": time.time(),
+            "last_scan": None,
         })
 
-    def _current_month(self) -> str:
-        return time.strftime("%Y-%m")
-
     def check_license(self) -> Dict:
-        """Check if the current usage is within limits. Returns status dict."""
-        current_month = self._current_month()
-        ps = self._get_product_state()
+        """Check license status. Free tier can always scan."""
+        license_key = self.state.get("license_key") or os.environ.get("CORRECTOVER_LICENSE_KEY")
 
-        # Reset monthly counter if it's a new month
-        if ps.get("month") != current_month:
-            ps["checks_used"] = 0
-            ps["month"] = current_month
+        if license_key and self._verify_license_key(license_key):
+            return {
+                "tier": "pro",
+                "can_scan": True,
+                "can_fix": True,
+                "can_report": True,
+                "can_heal": True,
+                "can_history": True,
+                "fix_preview": float("inf"),
+                "license_key": license_key[:8] + "..." if license_key else None,
+            }
 
-        license_key = self.state.get("license_key")
-        has_license = bool(license_key)
-
-        if has_license:
-            tier = "pro" if self._verify_license_key(license_key) else "free"
-            if tier == "pro":
-                return {
-                    "authorized": True,
-                    "tier": "pro",
-                    "checks_remaining": float("inf"),
-                    "checks_used": ps["checks_used"],
-                    "limit": float("inf"),
-                    "license_key": license_key[:8] + "..." if license_key else None,
-                }
-
-        # Free tier — monthly cumulative, no daily reset
-        remaining = max(0, self.FREE_LIMIT_PER_MONTH - ps["checks_used"])
+        # Free tier — can scan unlimited, but features are gated
         return {
-            "authorized": remaining > 0,
             "tier": "free",
-            "checks_remaining": remaining,
-            "checks_used": ps["checks_used"],
-            "limit": self.FREE_LIMIT_PER_MONTH,
+            "can_scan": True,
+            "can_fix": False,
+            "can_report": False,
+            "can_heal": False,
+            "can_history": False,
+            "fix_preview": self.FREE_FIX_PREVIEW,
             "license_key": None,
         }
 
-    def record_call(self, count: int = 1) -> Dict:
-        """Record API calls. count = number of checks consumed.
-        Returns updated status. If not authorized, returns status without recording."""
-        status = self.check_license()
-        if not status["authorized"]:
-            return status
-
+    def record_scan(self, risks_found: int = 0) -> Dict:
+        """Record a scan. Always allowed — this is the hook."""
         ps = self._get_product_state()
-        ps["checks_used"] += count
-        ps["total_checks"] = ps.get("total_checks", 0) + count
+        ps["total_scans"] += 1
+        ps["total_risks_found"] += risks_found
+        ps["last_scan"] = time.time()
         self._save_state()
 
-        remaining = max(0, self.FREE_LIMIT_PER_MONTH - ps["checks_used"])
-        status["checks_remaining"] = remaining
-        status["checks_used"] = ps["checks_used"]
-        return status
+        # Also add to scan history (free tier keeps last 1, Pro keeps all)
+        history = self.state.setdefault("scan_history", [])
+        history.append({
+            "time": time.time(),
+            "product": self.product,
+            "risks": risks_found,
+        })
+        if len(history) > 1 and self.check_license()["tier"] == "free":
+            # Free tier: only keep last scan (previous ones are the hook — "you had 5 risks last time")
+            history = history[-1:]
+            self.state["scan_history"] = history
+        self._save_state()
 
-    def can_run(self, count: int) -> bool:
-        """Check if user can run `count` checks without exceeding limit."""
-        status = self.check_license()
-        if status["tier"] == "pro":
-            return True
-        return status["checks_remaining"] >= count
+        return self.check_license()
 
     def set_license_key(self, key: str) -> bool:
-        """Set and validate a license key.
-
-        Supports two formats:
-
-        * **COV-<product>-<hash>** — Cloud-issued, HMAC-verified offline.
-        * **CV-TRL-<base64>** / **CV-PRO-<base64>** — FC-issued (XunhuPay),
-          base64 payload containing JWT-like signed claims.  Accepted as valid
-          when the payload decodes cleanly (the real verification happens
-          server-side in the FC callback).
-        """
         if self._verify_license_key(key):
             self.state["license_key"] = key
             self._save_state()
@@ -126,11 +110,10 @@ class LicenseValidator:
         return False
 
     def _verify_license_key(self, key: str) -> bool:
-        """Validate a license key against supported formats."""
         if not key or len(key) < 12:
             return False
 
-        # ── COV-<product>-<hash> (Cloud / HMAC offline) ──
+        # COV-<product>-<hash> (Cloud / HMAC offline)
         if key.startswith("COV-"):
             parts = key.split("-")
             if len(parts) < 3:
@@ -139,7 +122,7 @@ class LicenseValidator:
             expected_prefix = self._compute_key_prefix(product_code)
             return parts[-1].startswith(expected_prefix)
 
-        # ── CV-TRL-<base64> / CV-PRO-<base64> (FC / XunhuPay) ──
+        # CV-TRL-<base64> / CV-PRO-<base64> (FC / XunhuPay)
         if key.startswith("CV-"):
             parts = key.split("-", 2)
             if len(parts) < 3:
@@ -164,36 +147,49 @@ class LicenseValidator:
         secret = f"correctover-{product_code}-2026"
         return hashlib.sha256(secret.encode()).hexdigest()[:12]
 
-    def get_upgrade_message(self, context: str = "limit") -> str:
-        """Return the appropriate upgrade CTA based on context."""
+    def get_fix_cta(self, total_risks: int, hidden_risks: int) -> str:
+        """Generate CTA shown after scan results — the hook."""
         status = self.check_license()
-        if status["tier"] == "free":
-            remaining = status["checks_remaining"]
-            if remaining <= 0:
-                return (
-                    f"\n🚫 Free tier limit reached ({self.FREE_LIMIT_PER_MONTH} checks/month).\n"
-                    f"   Upgrade to Pro for unlimited checks + fix recommendations + auto-heal:\n"
-                    f"   → https://correctover.com/checkout\n"
-                    f"   Or: export CORRECTOVER_LICENSE_KEY=<your-key>\n"
-                )
-            elif context == "results":
-                return (
-                    f"\n{'━'*50}\n"
-                    f"🔒 {remaining} checks remaining this month.\n"
-                    f"   Upgrade to Pro for:\n"
-                    f"   • Full risk report (all findings, not just first 2)\n"
-                    f"   • Fix recommendations + code patches\n"
-                    f"   • Auto-heal (84.1% issues resolved automatically)\n"
-                    f"   • HTML/PDF audit reports\n"
-                    f"{'━'*50}\n"
-                    f"   → https://correctover.com/checkout\n"
-                    f"{'━'*50}\n"
-                )
-            return (
-                f"\n📊 Free tier: {remaining} checks remaining this month.\n"
-                f"   Upgrade to Pro: https://correctover.com/checkout\n"
-            )
-        return ""
+        if status["tier"] == "pro":
+            return ""
+
+        shown = total_risks - hidden_risks
+        lines = [
+            f"\n{'━'*55}",
+            f"🔒 {hidden_risks} fix recommendation(s) locked.",
+        ]
+        if total_risks > 0:
+            lines.append(f"   You have {total_risks} risk(s) but can only see {shown} fix(es).")
+        lines.extend([
+            f"",
+            f"🛡️  Upgrade to Pro to unlock:",
+            f"   ✓ Fix recommendations for all {total_risks} risk(s)",
+            f"   ✓ Auto-heal (84.1% issues resolved automatically)",
+            f"   ✓ HTML/PDF audit reports",
+            f"   ✓ Scan history & tracking",
+            f"{'━'*55}",
+            f"   → https://correctover.com/checkout",
+            f"   → export CORRECTOVER_LICENSE_KEY=<your-key>",
+            f"{'━'*55}",
+        ])
+        return "\n".join(lines)
+
+    def get_no_risk_cta(self) -> str:
+        """CTA when no risks found — still hook them."""
+        status = self.check_license()
+        if status["tier"] == "pro":
+            return ""
+        return (
+            f"\n{'━'*55}\n"
+            f"✅ No risks found in this scan.\n\n"
+            f"🛡️  Stay protected with Pro:\n"
+            f"   ✓ Continuous monitoring (auto-scan on config changes)\n"
+            f"   ✓ Auto-heal when risks appear\n"
+            f"   ✓ Compliance reports (OAuth 2.1, CCS v1.0)\n"
+            f"{'━'*55}\n"
+            f"   → https://correctover.com/checkout\n"
+            f"{'━'*55}"
+        )
 
     @staticmethod
     def get_license_from_env() -> Optional[str]:
@@ -210,20 +206,6 @@ def get_validator(product: str = "correctover-test") -> LicenseValidator:
     return _validators[product]
 
 
-def check_and_record(product: str = "correctover-test", count: int = 1) -> Dict:
-    """Check license, record calls, return status. Raise if over limit."""
-    v = get_validator(product)
-    status = v.check_license()
-
-    if not status["authorized"]:
-        msg = v.get_upgrade_message(context="limit")
-        raise LicenseExceededError(
-            f"Free tier limit ({v.FREE_LIMIT_PER_MONTH}/month) exceeded. {msg}"
-        )
-
-    return v.record_call(count)
-
-
 class LicenseExceededError(Exception):
-    """Raised when free tier limit is exceeded."""
+    """Kept for backward compatibility — no longer raised in freemium model."""
     pass
