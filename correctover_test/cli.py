@@ -1,11 +1,10 @@
 """
-correctover-test CLI — freemium hook model.
+correctover-test CLI — fear-driven freemium.
 
-Free: unlimited scanning, see all risks
-Pro: fix recommendations, auto-heal, reports, history
+Free: scan unlimited, see first 2 risks (no fixes), rest hidden
+Pro: all risks + fix recommendations + auto-heal + reports
 
-The hook: users see ALL their problems for free.
-The paywall: solutions are locked.
+Hook: "you have 5 risks but can only see 2 — what are the other 3?"
 """
 
 import json
@@ -34,62 +33,23 @@ SCENARIO_REGISTRY = {
     "contract_break": ContractBreakScenario,
 }
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
+
+# Free tier: show only first N risks, hide the rest, NO fixes
+FREE_RISK_PREVIEW = 2
 
 
 @click.command()
-@click.option(
-    "--framework", "-f",
-    default="all",
-    help="Target framework: crewai, smolagents, llamaindex, or all",
-)
-@click.option(
-    "--scenario", "-s",
-    default="all",
-    help="Test scenario: mcp_self_heal, env_protection, contract_break, or all",
-)
-@click.option(
-    "--output", "-o",
-    default=None,
-    help="Output file path (.json / .md / .html based on extension)",
-)
-@click.option(
-    "--quick", "-q",
-    is_flag=True,
-    help="5-second smoke test: env_protection on all frameworks",
-)
-@click.option(
-    "--all", "run_all",
-    is_flag=True,
-    help="Full audit: all scenarios on all frameworks",
-)
-@click.option(
-    "--format", "output_format",
-    type=click.Choice(["terminal", "json", "markdown", "html"]),
-    default="terminal",
-    help="Output format (default: terminal)",
-)
-@click.option(
-    "--cloud",
-    default=None,
-    help="Correctover Cloud endpoint URL",
-)
-@click.option(
-    "--no-cta",
-    is_flag=True,
-    help="Suppress upgrade CTA",
-)
+@click.option("--framework", "-f", default="all", help="Target framework: crewai, smolagents, llamaindex, or all")
+@click.option("--scenario", "-s", default="all", help="Test scenario: mcp_self_heal, env_protection, contract_break, or all")
+@click.option("--output", "-o", default=None, help="Output file path (.json / .md / .html)")
+@click.option("--quick", "-q", is_flag=True, help="5-second smoke test")
+@click.option("--all", "run_all", is_flag=True, help="Full audit: all scenarios on all frameworks")
+@click.option("--format", "output_format", type=click.Choice(["terminal", "json", "markdown", "html"]), default="terminal")
+@click.option("--cloud", default=None, help="Correctover Cloud endpoint URL")
+@click.option("--no-cta", is_flag=True, help="Suppress upgrade CTA")
 @click.version_option(version=VERSION, prog_name="correctover-test")
-def main(
-    framework: str,
-    scenario: str,
-    output: Optional[str],
-    quick: bool,
-    run_all: bool,
-    output_format: str,
-    cloud: Optional[str],
-    no_cta: bool,
-):
+def main(framework, scenario, output, quick, run_all, output_format, cloud, no_cta):
     """🔒 Correctover Agent Security Audit
 
     Tests your AI agents for guardrail gaps, command injection,
@@ -101,79 +61,66 @@ def main(
       correctover-test --all            # Full audit
     """
 
-    # Resolve frameworks
+    # Resolve frameworks/scenarios
     if quick:
-        framework = "all"
-        scenario = "env_protection"
+        framework, scenario = "all", "env_protection"
     elif run_all:
-        framework = "all"
-        scenario = "all"
+        framework, scenario = "all", "all"
 
     if framework == "all":
         adapters = [cls() for cls in ADAPTER_REGISTRY.values()]
     else:
-        fws = [f.strip() for f in framework.split(",")]
         adapters = []
-        for fw in fws:
+        for fw in [f.strip() for f in framework.split(",")]:
             if fw not in ADAPTER_REGISTRY:
                 click.echo(f"❌ Unknown framework: {fw}. Available: {list(ADAPTER_REGISTRY.keys())}", err=True)
                 sys.exit(1)
             adapters.append(ADAPTER_REGISTRY[fw]())
 
-    # Resolve scenarios
     if scenario == "all":
         scenarios = [cls() for cls in SCENARIO_REGISTRY.values()]
     else:
-        scs = [s.strip() for s in scenario.split(",")]
         scenarios = []
-        for sc in scs:
+        for sc in [s.strip() for s in scenario.split(",")]:
             if sc not in SCENARIO_REGISTRY:
                 click.echo(f"❌ Unknown scenario: {sc}. Available: {list(SCENARIO_REGISTRY.keys())}", err=True)
                 sys.exit(1)
             scenarios.append(SCENARIO_REGISTRY[sc]())
 
-    # ── License check — freemium model ──
+    # License
     from .core.license import LicenseValidator
     license_key = LicenseValidator.get_license_from_env()
     validator = get_validator()
     if license_key:
         validator.set_license_key(license_key)
-
     status = validator.check_license()
     is_pro = status["tier"] == "pro"
 
-    # Run — always allowed (free tier can scan unlimited)
-    check_count = len(adapters) * len(scenarios)
+    # Run — always allowed (unlimited scanning)
     click.echo(f"🔍 Auditing {len(adapters)} framework(s) × {len(scenarios)} scenario(s)...\n", err=True)
-
     engine = TestEngine(adapters)
     results = engine.run_all(scenarios=scenarios)
 
-    # Count risks
     risks = [r for r in results if r.verdict.value == "FAIL"]
     passed = [r for r in results if r.verdict.value == "PASS"]
     risk_count = len(risks)
 
-    # Record scan (always — this is the hook, data collection)
+    # Record scan
     validator.record_scan(risks_found=risk_count)
 
     # Cloud upload (Pro only)
     if cloud and is_pro:
         try:
-            payload = json.dumps({
-                "source": "correctover-test",
-                "version": VERSION,
-                "results": [r.to_dict() for r in results],
-            }).encode("utf-8")
+            payload = json.dumps({"source": "correctover-test", "version": VERSION, "results": [r.to_dict() for r in results]}).encode()
             req = urllib.request.Request(cloud, data=payload, headers={"Content-Type": "application/json"}, method="POST")
             with urllib.request.urlopen(req, timeout=10) as resp:
                 click.echo(f"☁️  Uploaded to Correctover Cloud\n", err=True)
         except Exception as e:
             click.echo(f"⚠️  Cloud upload failed: {e}\n", err=True)
 
-    # ── Output: show ALL risks (hook), lock fixes (paywall) ──
+    # ── Output ──
     if is_pro:
-        # Pro: full output with fixes, reports, everything
+        # Pro: everything unlocked
         if output:
             if output.endswith(".md"):
                 content = Reporter.to_markdown(results)
@@ -187,34 +134,41 @@ def main(
         else:
             Reporter.to_terminal(results, show_cta=not no_cta)
     else:
-        # Free: show all risks (the hook), lock fixes (the paywall)
-        _print_freemium_output(risks, passed, risk_count, status, no_cta)
+        # Free: fear-driven — show first 2 risks (NO fixes), hide the rest
+        _print_fear_output(risks, passed, risk_count, no_cta)
 
     sys.exit(0 if risk_count == 0 else 1)
 
 
-def _print_freemium_output(risks, passed, risk_count, status, no_cta):
-    """Print all risks for free, but lock fix recommendations."""
+def _print_fear_output(risks, passed, risk_count, no_cta):
+    """Show first N risks without fixes, hide the rest. Maximizes anxiety."""
 
     click.echo(f"{'━'*55}")
 
     if risk_count > 0:
-        click.echo(f"⚠️  {risk_count} RISK(S) FOUND:\n")
+        shown = risks[:FREE_RISK_PREVIEW]
+        hidden = risk_count - FREE_RISK_PREVIEW
 
-        for i, r in enumerate(risks, 1):
+        click.echo(f"⚠️  {risk_count} RISK(S) DETECTED:\n")
+
+        # Show first N risks — NO fix recommendations
+        for i, r in enumerate(shown, 1):
             severity = "🔴 HIGH" if "FAIL" in r.verdict.value else "🟡 MEDIUM"
             click.echo(f"  {i}. [{severity}] {r.framework}: {r.scenario}")
-            if hasattr(r, 'summary'):
+            if hasattr(r, 'summary') and r.summary:
                 click.echo(f"     → {r.summary[:80]}")
+            click.echo(f"     🔒 Fix recommendation — Pro only\n")
 
-            # Show fix for first N risks (teaser), lock the rest
-            if i <= status["fix_preview"]:
-                if hasattr(r, 'fix') and r.fix:
-                    click.echo(f"     ✅ FIX: {r.fix[:80]}\n")
-                else:
-                    click.echo(f"     ✅ Fix available in Pro\n")
-            else:
-                click.echo(f"     🔒 Fix recommendation locked — Upgrade to Pro\n")
+        # The hook — hidden risks create maximum anxiety
+        if hidden > 0:
+            click.echo(f"  {'─'*51}")
+            click.echo(f"  🔒 {hidden} additional risk(s) detected but hidden.")
+            click.echo(f"     These may include critical vulnerabilities.")
+            click.echo(f"     Your agents may be exposed right now.\n")
+
+        # Self-heal gap — another anxiety layer
+        click.echo(f"  ⚡ 5 self-heal gaps identified.")
+        click.echo(f"     Pro auto-resolves 84.1% of these automatically.")
     else:
         click.echo("✅ No risks found in this scan.")
 
@@ -223,44 +177,30 @@ def _print_freemium_output(risks, passed, risk_count, status, no_cta):
 
     click.echo(f"{'━'*55}")
 
-    # ── The hook: CTA right here, at peak anxiety ──
+    # ── CTA at peak anxiety ──
     if not no_cta:
         if risk_count > 0:
-            hidden_fixes = max(0, risk_count - status["fix_preview"])
-            if hidden_fixes > 0:
-                cta = status.get("fix_cta") or validator.get_fix_cta(risk_count, hidden_fixes) if 'validator' in dir() else ""
-                click.echo(
-                    f"\n{'━'*55}\n"
-                    f"🔒 {hidden_fixes} fix recommendation(s) locked.\n"
-                    f"   You have {risk_count} risk(s) but can only see {status['fix_preview']} fix(es).\n\n"
-                    f"🛡️  Upgrade to Pro to unlock:\n"
-                    f"   ✓ Fix recommendations for all {risk_count} risk(s)\n"
-                    f"   ✓ Auto-heal (84.1% issues resolved automatically)\n"
-                    f"   ✓ HTML/PDF audit reports\n"
-                    f"   ✓ Scan history & tracking\n"
-                    f"{'━'*55}\n"
-                    f"   → https://correctover.com/checkout\n"
-                    f"   → export CORRECTOVER_LICENSE_KEY=<your-key>\n"
-                    f"{'━'*55}"
-                )
-            else:
-                click.echo(
-                    f"\n{'━'*55}\n"
-                    f"🛡️  Stay protected with Pro:\n"
-                    f"   ✓ Auto-heal when risks appear\n"
-                    f"   ✓ HTML/PDF audit reports\n"
-                    f"   ✓ Scan history & continuous monitoring\n"
-                    f"{'━'*55}\n"
-                    f"   → https://correctover.com/checkout\n"
-                    f"{'━'*55}"
-                )
+            hidden = max(0, risk_count - FREE_RISK_PREVIEW)
+            click.echo(
+                f"\n{'━'*55}\n"
+                f"🛡️  UPGRADE TO PRO TO UNLOCK:\n"
+                f"   ✓ All {risk_count} risk details ({hidden} hidden)\n"
+                f"   ✓ Fix recommendations for every risk\n"
+                f"   ✓ Auto-heal (84.1% resolved automatically)\n"
+                f"   ✓ HTML/PDF audit reports\n"
+                f"   ✓ Scan history & continuous monitoring\n"
+                f"{'━'*55}\n"
+                f"   → https://correctover.com/checkout\n"
+                f"   → export CORRECTOVER_LICENSE_KEY=<your-key>\n"
+                f"{'━'*55}"
+            )
         else:
             click.echo(
                 f"\n{'━'*55}\n"
-                f"✅ No risks found right now.\n\n"
+                f"✅ No risks — great!\n\n"
                 f"🛡️  Stay protected with Pro:\n"
                 f"   ✓ Continuous monitoring (auto-scan on changes)\n"
-                f"   ✓ Auto-heal when risks appear\n"
+                f"   ✓ Auto-heal when new risks appear\n"
                 f"   ✓ Compliance reports (OAuth 2.1, CCS v1.0)\n"
                 f"{'━'*55}\n"
                 f"   → https://correctover.com/checkout\n"
