@@ -1,6 +1,11 @@
 """
-License validator — enforces free tier limits (50 audits/day).
+License validator — enforces free tier limits (30 checks/month, no reset).
 Embedded in all Correctover Agent products.
+
+Billing model:
+  - Free: 30 checks/month (cumulative, no daily reset)
+  - Pro:  unlimited
+  - 1 check = 1 test scenario executed (e.g. --all = 9 checks)
 """
 
 import hashlib
@@ -14,7 +19,7 @@ from typing import Dict, Optional
 class LicenseValidator:
     """Enforces usage limits for Correctover Agent products."""
 
-    FREE_LIMIT_PER_DAY = 50
+    FREE_LIMIT_PER_MONTH = 30
     STATE_FILE = Path.home() / ".correctover" / "license.json"
 
     def __init__(self, product: str):
@@ -35,60 +40,73 @@ class LicenseValidator:
 
     def _get_product_state(self) -> Dict:
         return self.state["products"].setdefault(self.product, {
-            "calls_today": 0,
-            "date": time.strftime("%Y-%m-%d"),
-            "total_calls": 0,
+            "checks_used": 0,
+            "month": time.strftime("%Y-%m"),
+            "total_checks": 0,
         })
+
+    def _current_month(self) -> str:
+        return time.strftime("%Y-%m")
 
     def check_license(self) -> Dict:
         """Check if the current usage is within limits. Returns status dict."""
-        today = time.strftime("%Y-%m-%d")
+        current_month = self._current_month()
         ps = self._get_product_state()
 
-        # Reset daily counter if it's a new day
-        if ps.get("date") != today:
-            ps["calls_today"] = 0
-            ps["date"] = today
+        # Reset monthly counter if it's a new month
+        if ps.get("month") != current_month:
+            ps["checks_used"] = 0
+            ps["month"] = current_month
 
         license_key = self.state.get("license_key")
         has_license = bool(license_key)
 
         if has_license:
-            # Pro/Enterprise — no limits
-            return {
-                "authorized": True,
-                "tier": "pro" if self._verify_license_key(license_key) else "free",
-                "calls_remaining": float("inf"),
-                "calls_today": ps["calls_today"],
-                "limit": float("inf"),
-                "license_key": license_key[:8] + "..." if license_key else None,
-            }
+            tier = "pro" if self._verify_license_key(license_key) else "free"
+            if tier == "pro":
+                return {
+                    "authorized": True,
+                    "tier": "pro",
+                    "checks_remaining": float("inf"),
+                    "checks_used": ps["checks_used"],
+                    "limit": float("inf"),
+                    "license_key": license_key[:8] + "..." if license_key else None,
+                }
 
-        # Free tier
-        remaining = max(0, self.FREE_LIMIT_PER_DAY - ps["calls_today"])
+        # Free tier — monthly cumulative, no daily reset
+        remaining = max(0, self.FREE_LIMIT_PER_MONTH - ps["checks_used"])
         return {
             "authorized": remaining > 0,
             "tier": "free",
-            "calls_remaining": remaining,
-            "calls_today": ps["calls_today"],
-            "limit": self.FREE_LIMIT_PER_DAY,
+            "checks_remaining": remaining,
+            "checks_used": ps["checks_used"],
+            "limit": self.FREE_LIMIT_PER_MONTH,
             "license_key": None,
         }
 
-    def record_call(self) -> Dict:
-        """Record a single API call. Returns updated status."""
+    def record_call(self, count: int = 1) -> Dict:
+        """Record API calls. count = number of checks consumed.
+        Returns updated status. If not authorized, returns status without recording."""
         status = self.check_license()
         if not status["authorized"]:
             return status
 
         ps = self._get_product_state()
-        ps["calls_today"] += 1
-        ps["total_calls"] = ps.get("total_calls", 0) + 1
+        ps["checks_used"] += count
+        ps["total_checks"] = ps.get("total_checks", 0) + count
         self._save_state()
 
-        status["calls_remaining"] = max(0, status["limit"] - ps["calls_today"])
-        status["calls_today"] = ps["calls_today"]
+        remaining = max(0, self.FREE_LIMIT_PER_MONTH - ps["checks_used"])
+        status["checks_remaining"] = remaining
+        status["checks_used"] = ps["checks_used"]
         return status
+
+    def can_run(self, count: int) -> bool:
+        """Check if user can run `count` checks without exceeding limit."""
+        status = self.check_license()
+        if status["tier"] == "pro":
+            return True
+        return status["checks_remaining"] >= count
 
     def set_license_key(self, key: str) -> bool:
         """Set and validate a license key.
@@ -122,7 +140,6 @@ class LicenseValidator:
             return parts[-1].startswith(expected_prefix)
 
         # ── CV-TRL-<base64> / CV-PRO-<base64> (FC / XunhuPay) ──
-        # Format: CV-{TRL|PRO}-{urlsafe_b64(json_claims)}.{urlsafe_b64(hmac)}
         if key.startswith("CV-"):
             parts = key.split("-", 2)
             if len(parts) < 3:
@@ -130,7 +147,6 @@ class LicenseValidator:
             import base64 as _b64
             try:
                 payload = parts[2]
-                # The payload is "<b64_claims>.<b64_sig>" — decode the claims part
                 dot = payload.find(".")
                 if dot > 0:
                     b64_claims = payload[:dot]
@@ -148,19 +164,33 @@ class LicenseValidator:
         secret = f"correctover-{product_code}-2026"
         return hashlib.sha256(secret.encode()).hexdigest()[:12]
 
-    def get_upgrade_message(self) -> str:
-        """Return the appropriate upgrade CTA."""
+    def get_upgrade_message(self, context: str = "limit") -> str:
+        """Return the appropriate upgrade CTA based on context."""
         status = self.check_license()
         if status["tier"] == "free":
-            remaining = status["calls_remaining"]
+            remaining = status["checks_remaining"]
             if remaining <= 0:
                 return (
-                    f"\n🚫 Free tier limit reached ({self.FREE_LIMIT_PER_DAY} audits/day).\n"
-                    f"   Upgrade to Pro for unlimited audits: https://correctover.com/checkout\n"
-                    f"   Or set your license key: export CORRECTOVER_LICENSE_KEY=<your-key>\n"
+                    f"\n🚫 Free tier limit reached ({self.FREE_LIMIT_PER_MONTH} checks/month).\n"
+                    f"   Upgrade to Pro for unlimited checks + fix recommendations + auto-heal:\n"
+                    f"   → https://correctover.com/checkout\n"
+                    f"   Or: export CORRECTOVER_LICENSE_KEY=<your-key>\n"
+                )
+            elif context == "results":
+                return (
+                    f"\n{'━'*50}\n"
+                    f"🔒 {remaining} checks remaining this month.\n"
+                    f"   Upgrade to Pro for:\n"
+                    f"   • Full risk report (all findings, not just first 2)\n"
+                    f"   • Fix recommendations + code patches\n"
+                    f"   • Auto-heal (84.1% issues resolved automatically)\n"
+                    f"   • HTML/PDF audit reports\n"
+                    f"{'━'*50}\n"
+                    f"   → https://correctover.com/checkout\n"
+                    f"{'━'*50}\n"
                 )
             return (
-                f"\n📊 Free tier: {remaining} audits remaining today.\n"
+                f"\n📊 Free tier: {remaining} checks remaining this month.\n"
                 f"   Upgrade to Pro: https://correctover.com/checkout\n"
             )
         return ""
@@ -180,18 +210,18 @@ def get_validator(product: str = "correctover-test") -> LicenseValidator:
     return _validators[product]
 
 
-def check_and_record(product: str = "correctover-test") -> Dict:
-    """Check license, record call, return status. Raise if over limit."""
+def check_and_record(product: str = "correctover-test", count: int = 1) -> Dict:
+    """Check license, record calls, return status. Raise if over limit."""
     v = get_validator(product)
     status = v.check_license()
 
     if not status["authorized"]:
-        msg = v.get_upgrade_message()
+        msg = v.get_upgrade_message(context="limit")
         raise LicenseExceededError(
-            f"Free tier limit ({v.FREE_LIMIT_PER_DAY}/day) exceeded. {msg}"
+            f"Free tier limit ({v.FREE_LIMIT_PER_MONTH}/month) exceeded. {msg}"
         )
 
-    return v.record_call()
+    return v.record_call(count)
 
 
 class LicenseExceededError(Exception):

@@ -34,7 +34,10 @@ SCENARIO_REGISTRY = {
     "contract_break": ContractBreakScenario,
 }
 
-VERSION = "0.3.2"
+VERSION = "0.4.0"
+
+# Free tier: show only first N risks, hide the rest behind paywall
+FREE_RISK_PREVIEW = 2
 
 
 @click.command()
@@ -142,18 +145,43 @@ def main(
                 sys.exit(1)
             scenarios.append(SCENARIO_REGISTRY[sc]())
 
-    # License check — download-to-pay enforcement
+    # ── License check — per-check billing ──
+    # Count how many checks this run will consume
+    check_count = len(adapters) * len(scenarios)
+
     try:
         from .core.license import LicenseValidator
         license_key = LicenseValidator.get_license_from_env()
         validator = get_validator()
         if license_key:
             validator.set_license_key(license_key)
-        status = validator.record_call()
-        if status["tier"] == "free":
+
+        # Pre-check: can user afford this many checks?
+        status = validator.check_license()
+        is_pro = status["tier"] == "pro"
+
+        if not is_pro:
+            remaining = status["checks_remaining"]
+            if remaining < check_count:
+                # Not enough — show what they can run
+                click.echo(
+                    f"🚫 Not enough checks remaining ({remaining}/{validator.FREE_LIMIT_PER_MONTH} this month).\n"
+                    f"   This run needs {check_count} checks ({len(adapters)} frameworks × {len(scenarios)} scenarios).\n\n"
+                    f"   Options:\n"
+                    f"   1. Upgrade to Pro for unlimited: https://correctover.com/checkout\n"
+                    f"   2. Run fewer scenarios: correctover-test --framework crewai --scenario env_protection\n"
+                    f"   3. Set license: export CORRECTOVER_LICENSE_KEY=<your-key>\n",
+                    err=True,
+                )
+                sys.exit(1)
+
+        # Record consumption
+        status = validator.record_call(count=check_count)
+
+        if not is_pro:
             click.echo(
-                f"📊 Free tier: {status['calls_remaining']} audits remaining today "
-                f"({status['calls_today']}/{status['limit']} used)",
+                f"📊 Free tier: {status['checks_remaining']}/{validator.FREE_LIMIT_PER_MONTH} checks remaining "
+                f"(−{check_count} this run)",
                 err=True,
             )
     except LicenseExceededError as e:
@@ -162,14 +190,15 @@ def main(
 
     # Run
     click.echo(
-        f"🔍 Auditing {len(adapters)} framework(s) × {len(scenarios)} scenario(s)...",
+        f"🔍 Auditing {len(adapters)} framework(s) × {len(scenarios)} scenario(s) "
+        f"({check_count} checks)...",
         err=True,
     )
     engine = TestEngine(adapters)
     results = engine.run_all(scenarios=scenarios)
 
-    # Upload to cloud
-    if cloud:
+    # Upload to cloud (Pro only)
+    if cloud and is_pro:
         try:
             payload = json.dumps({
                 "source": "correctover-test",
@@ -191,31 +220,85 @@ def main(
         except Exception as e:
             click.echo(f"⚠️  Cloud upload failed: {e}", err=True)
 
-    # Output
-    if output:
-        if output.endswith(".md"):
-            content = Reporter.to_markdown(results)
-        elif output.endswith(".html"):
-            content = Reporter.to_html(results)
-        else:
-            content = Reporter.to_json(results)
-        with open(output, "w") as f:
-            f.write(content)
-        click.echo(f"📄 Report written to {output}", err=True)
+    # ── Output: free tier shows limited results, Pro shows everything ──
+    # Count risks (FAIL results)
+    risks = [r for r in results if r.verdict.value == "FAIL"]
+    passed = [r for r in results if r.verdict.value == "PASS"]
+
+    if not is_pro and len(risks) > FREE_RISK_PREVIEW:
+        # Free tier: show first N risks, hide the rest
+        _print_free_output(risks, passed, check_count, status, no_cta)
     else:
-        if output_format == "json":
-            click.echo(Reporter.to_json(results))
-        elif output_format == "markdown":
-            click.echo(Reporter.to_markdown(results))
-        elif output_format == "html":
-            click.echo(Reporter.to_html(results))
+        # Pro tier: full output
+        if output:
+            if output.endswith(".md"):
+                content = Reporter.to_markdown(results)
+            elif output.endswith(".html"):
+                content = Reporter.to_html(results)
+            else:
+                content = Reporter.to_json(results)
+            with open(output, "w") as f:
+                f.write(content)
+            click.echo(f"📄 Report written to {output}", err=True)
         else:
-            Reporter.to_terminal(results, show_cta=not no_cta)
+            if output_format == "json":
+                click.echo(Reporter.to_json(results))
+            elif output_format == "markdown":
+                click.echo(Reporter.to_markdown(results))
+            elif output_format == "html":
+                click.echo(Reporter.to_html(results))
+            else:
+                Reporter.to_terminal(results, show_cta=not no_cta)
 
     # Exit code
     total = len(results)
     failed = sum(1 for r in results if r.verdict.value == "FAIL")
     sys.exit(0 if failed == 0 else 1)
+
+
+def _print_free_output(risks, passed, check_count, status, no_cta):
+    """Print limited results for free tier users — show first N risks, hide rest."""
+    click.echo("")
+    click.echo(f"{'━'*55}")
+
+    shown = risks[:FREE_RISK_PREVIEW]
+    hidden = len(risks) - FREE_RISK_PREVIEW
+
+    if risks:
+        click.echo(f"⚠️  {len(risks)} RISK(S) FOUND:\n")
+        for i, r in enumerate(shown, 1):
+            severity = "🔴 HIGH" if "FAIL" in r.verdict.value else "🟡 MEDIUM"
+            click.echo(f"  {i}. [{severity}] {r.framework}: {r.scenario}")
+            click.echo(f"     → {r.summary[:80] if hasattr(r, 'summary') else 'Risk detected in agent configuration'}")
+            click.echo(f"     🔒 Fix recommendation locked — Upgrade to Pro\n")
+
+        if hidden > 0:
+            click.echo(f"  {'─'*51}")
+            click.echo(f"  🔒 {hidden} additional risk(s) detected but hidden.")
+            click.echo(f"     These may include critical vulnerabilities.")
+            click.echo("")
+    else:
+        click.echo("✅ No risks found in the checked scenarios.\n")
+
+    if passed:
+        click.echo(f"  ✅ {len(passed)} scenario(s) passed.")
+
+    click.echo(f"{'━'*55}")
+
+    # CTA — right in the middle of the anxiety
+    if not no_cta:
+        click.echo(
+            f"\n{'━'*55}\n"
+            f"🛡️  UPGRADE TO PRO TO UNLOCK:\n"
+            f"   • All {len(risks)} risk details + fix recommendations\n"
+            f"   • Auto-heal (84.1% issues resolved automatically)\n"
+            f"   • Full HTML/PDF audit reports\n"
+            f"   • Unlimited checks (you've used {status['checks_used']}/30 this month)\n"
+            f"{'━'*55}\n"
+            f"   → https://correctover.com/checkout\n"
+            f"   → export CORRECTOVER_LICENSE_KEY=<your-key>\n"
+            f"{'━'*55}"
+        )
 
 
 if __name__ == "__main__":
